@@ -5,7 +5,6 @@ import io
 
 st.set_page_config(page_title="Sales Manager", layout="wide")
 
-# CSS Dashboard chuyên nghiệp, lề lối thoáng, tone màu Navy sang trọng
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -29,10 +28,10 @@ def clean_currency(value):
         return float(value.replace('$', '').replace(',', '').strip())
     return value
 
-uploaded_file = st.sidebar.file_uploader("Upload Data File", type=["xlsx"])
+uploaded_file = st.sidebar.file_uploader("Upload Data File (SF Only Logic)", type=["xlsx"])
 
 if uploaded_file:
-    # Đọc và chuẩn hóa (Chỉ lấy SF)
+    # 1. Đọc và Chuẩn hóa
     df_sales_raw = pd.read_excel(uploaded_file, sheet_name=0)
     df_leads_raw = pd.read_excel(uploaded_file, sheet_name=1)
     
@@ -42,7 +41,7 @@ if uploaded_file:
     df_sales_raw['LEAD ID'] = df_sales_raw['LEAD ID'].astype(str)
     df_leads_raw['LEAD ID'] = df_leads_raw['LEAD ID'].astype(str)
     
-    # FILTER SF ONLY
+    # CHỈ LẤY NGUỒN SF
     df_sales = df_sales_raw[df_sales_raw['SOURCE'] == 'SF'].copy()
     df_leads = df_leads_raw.copy()
 
@@ -50,7 +49,7 @@ if uploaded_file:
     df_sales['TARGET PREMIUM'] = df_sales['TARGET PREMIUM'].apply(clean_currency)
     df_sales['DOANH SỐ THỰC'] = df_sales[['ANNUAL PREMIUM', 'TARGET PREMIUM']].min(axis=1)
 
-    # Logic Chốt Nóng (Nhận tháng nào chốt tháng đó)
+    # 2. Logic Chốt Nóng & Tỉ Lệ Tích Lũy
     df_leads['THÁNG_NHẬN'] = df_leads['DATE ADDED'].dt.month
     df_hot = pd.merge(
         df_leads[['OWNER', 'TEAM', 'LEAD ID', 'THÁNG_NHẬN']], 
@@ -59,77 +58,78 @@ if uploaded_file:
     )
     df_hot_closed = df_hot[df_hot['THÁNG_NHẬN'] == df_hot['THÁNG NHẬN FILE']]
 
-    # Bảng chi tiết từng tháng
-    monthly_data = []
-    for m in sorted(df_leads['THÁNG_NHẬN'].unique()):
-        recv = df_leads[df_leads['THÁNG_NHẬN'] == m].shape[0]
-        hot_cls = df_hot_closed[df_hot_closed['THÁNG_NHẬN'] == m].shape[0]
-        monthly_data.append({
-            'Tháng': f"Tháng {int(m)}",
-            'Lead Nhận': recv,
-            'Chốt Nóng': hot_cls,
-            'Tỉ lệ (%)': round(hot_cls/recv*100, 2) if recv > 0 else 0
-        })
-    df_monthly = pd.DataFrame(monthly_data)
+    # Bảng chi tiết từng nhân viên (Theo tháng + Tổng tích lũy)
+    e_recv = df_leads.groupby(['OWNER', 'THÁNG_NHẬN']).size().reset_index(name='Nhận_Tháng')
+    e_hot = df_hot_closed.groupby(['OWNER', 'THÁNG_NHẬN']).size().reset_index(name='Chốt_Nóng')
+    df_perf = pd.merge(e_recv, e_hot, on=['OWNER', 'THÁNG_NHẬN'], how='left').fillna(0)
+    
+    # Tính Tổng tích lũy 3 tháng của từng người
+    l_tot = df_leads.groupby('OWNER').size().reset_index(name='Tổng_Nhận')
+    c_tot = df_sales.groupby('OWNER').size().reset_index(name='Tổng_Chốt')
+    perf_tot = pd.merge(l_tot, c_tot, on='OWNER', how='left').fillna(0)
+    perf_tot['Tổng Tỉ Lệ (%)'] = (perf_tot['Tổng_Chốt'] / perf_tot['Tổng_Nhận'] * 100).round(2)
+    
+    df_emp_final = pd.merge(df_perf, perf_tot[['OWNER', 'Tổng Tỉ Lệ (%)']], on='OWNER', how='left')
 
-    # Tính Hàng Tổng
-    t_recv = df_monthly['Lead Nhận'].sum()
-    t_hot = df_monthly['Chốt Nóng'].sum()
-    t_rate = round(t_hot/t_recv*100, 2) if t_recv > 0 else 0
-    df_total = pd.DataFrame([{'Tháng': 'TỔNG CỘNG', 'Lead Nhận': t_recv, 'Chốt Nóng': t_hot, 'Tỉ lệ (%)': t_rate}])
-    df_report_final = pd.concat([df_monthly, df_total], ignore_index=True)
+    # Bảng Sản phẩm SF (Số lượng & Doanh số)
+    df_prod_sf = df_sales.groupby('PRODUCT').agg({'LEAD ID': 'count', 'DOANH SỐ THỰC': 'sum'}).reset_index()
+    df_prod_sf.columns = ['Sản phẩm', 'Số lượng chốt', 'Doanh số ($)']
+    df_prod_sf = df_prod_sf.sort_values(by='Số lượng chốt', ascending=False)
 
-    # Thống kê Sản phẩm SF
-    df_prod_sf = df_sales.groupby('PRODUCT').size().reset_index(name='Số lượng chốt').sort_values(by='Số lượng chốt', ascending=False)
-
-    # --- XUẤT FILE EXCEL BÁO CÁO (SF ONLY) ---
+    # --- XUẤT FILE EXCEL QUẢN TRỊ (SF ONLY) ---
     st.sidebar.markdown("---")
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         workbook = writer.book
+        # Formats
         h_fmt = workbook.add_format({'bold': True, 'bg_color': '#0f172a', 'font_color': 'white', 'border': 1, 'align': 'center'})
-        df_report_final.to_excel(writer, sheet_name='SF_REPORT', index=False, startrow=1)
-        ws = writer.sheets['SF_REPORT']
-        for col_num, value in enumerate(df_report_final.columns.values): ws.write(1, col_num, value, h_fmt)
-        
-        # Biểu đồ trực quan trong Excel
-        chart = workbook.add_chart({'type': 'column'})
-        chart.add_series({
-            'name': 'Chốt Nóng',
-            'categories': f'=SF_REPORT!$A$3:$A${len(df_monthly)+2}',
-            'values': f'=SF_REPORT!$C$3:$C${len(df_monthly)+2}',
-            'fill': {'color': '#1e293b'}
-        })
-        ws.insert_chart('F2', chart)
-        
-        df_prod_sf.to_excel(writer, sheet_name='SAN_PHAM_SF', index=False)
+        money_fmt = workbook.add_format({'num_format': '$#,##0', 'border': 1})
+        pct_fmt = workbook.add_format({'num_format': '0.00"%"', 'border': 1, 'bold': True})
 
-    st.sidebar.download_button("Download SF Final Report", data=output.getvalue(), file_name="SF_Funnel_Report.xlsx")
+        # Sheet 1: NHÂN VIÊN (Tháng & Tổng)
+        df_emp_final.to_excel(writer, sheet_name='NHAN_VIEN_SF', index=False)
+        ws_emp = writer.sheets['NHAN_VIEN_SF']
+        ws_emp.set_column('A:G', 18)
+        for i, col in enumerate(df_emp_final.columns): ws_emp.write(0, i, col, h_fmt)
+
+        # Sheet 2: SẢN PHẨM SF (Kèm Biểu đồ & Doanh số)
+        df_prod_sf.to_excel(writer, sheet_name='SAN_PHAM_SF', index=False)
+        ws_p = writer.sheets['SAN_PHAM_SF']
+        ws_p.set_column('A:C', 20)
+        for i, col in enumerate(df_prod_sf.columns): ws_p.write(0, i, col, h_fmt)
+        
+        # Chèn biểu đồ tròn sản phẩm
+        chart_p = workbook.add_chart({'type': 'pie'})
+        chart_p.add_series({
+            'name': 'Cơ cấu Sản phẩm',
+            'categories': f'=SAN_PHAM_SF!$A$2:$A${len(df_prod_sf)+1}',
+            'values': f'=SAN_PHAM_SF!$B$2:$B${len(df_prod_sf)+1}',
+        })
+        chart_p.set_title({'name': 'Tỉ lệ Sản phẩm theo Số lượng'})
+        ws_p.insert_chart('E2', chart_p)
+
+    st.sidebar.download_button("Download Final SF Report", data=output.getvalue(), file_name="Henry_SF_Manager_Report.xlsx")
 
     # --- UI WEB APP ---
-    tab1, tab2 = st.tabs(["🚀 BÁO CÁO FUNNEL SF", "👥 CHI TIẾT NHÂN VIÊN"])
+    tab1, tab2 = st.tabs(["📊 BÁO CÁO TỔNG HỢP", "👥 CHI TIẾT NHÂN VIÊN"])
     
     with tab1:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("TỔNG LEAD SF", f"{t_recv:,}")
-        c2.metric("TỔNG CHỐT NÓNG", f"{t_hot:,}")
-        c3.metric("TỈ LỆ CHUNG", f"{t_rate}%")
-        
-        st.markdown("### Chi tiết hiệu quả chốt theo tháng")
-        st.dataframe(df_report_final, use_container_width=True, hide_index=True)
-        
-        st.markdown("### Biểu đồ so sánh Nhận vs Chốt Nóng")
-        st.bar_chart(df_monthly.set_index('Tháng')[['Lead Nhận', 'Chốt Nóng']])
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("### Sản phẩm SF chủ lực")
+            st.dataframe(df_prod_sf, use_container_width=True, hide_index=True)
+        with c2:
+            st.markdown("### Cơ cấu doanh số SF")
+            st.bar_chart(df_prod_sf.set_index('Sản phẩm')['Doanh số ($)'], color="#0f172a")
 
-        st.markdown("### Cơ cấu Sản phẩm SF")
-        st.dataframe(df_prod_sf, use_container_width=True, hide_index=True)
+        st.markdown("### Tổng hợp hiệu suất Funnel theo tháng")
+        m_summary = df_emp_final.groupby('THÁNG_NHẬN').agg({'Nhận_Tháng': 'sum', 'Chốt_Nóng': 'sum'}).reset_index()
+        m_summary['% Chốt Nóng'] = (m_summary['Chốt_Nóng'] / m_summary['Nhận_Tháng'] * 100).round(2)
+        st.dataframe(m_summary, use_container_width=True, hide_index=True)
 
     with tab2:
-        st.markdown("### Hiệu suất Chốt Nóng từng nhân viên")
-        e_recv = df_leads.groupby(['OWNER', 'THÁNG_NHẬN']).size().reset_index(name='Nhận')
-        e_hot = df_hot_closed.groupby(['OWNER', 'THÁNG_NHẬN']).size().reset_index(name='Chốt Nóng')
-        df_e = pd.merge(e_recv, e_hot, on=['OWNER', 'THÁNG_NHẬN'], how='left').fillna(0)
-        df_e['%'] = (df_e['Chốt Nóng'] / df_e['Nhận'] * 100).round(2)
-        st.dataframe(df_e.sort_values(by=['THÁNG_NHẬN', '%'], ascending=[True, False]), use_container_width=True, hide_index=True)
+        st.markdown("### Hiệu suất Chốt Nóng & Tổng Tỉ Lệ (%) từng Sale")
+        st.dataframe(df_emp_final.sort_values(by=['THÁNG_NHẬN', 'Tổng Tỉ Lệ (%)'], ascending=[True, False]), 
+                     use_container_width=True, hide_index=True)
 else:
-    st.info("Anh Công hãy tải file lên để em xử lý báo cáo SF chuẩn nhất nhé.")
+    st.info("Vui lòng tải file để em xuất báo cáo SF chuẩn nhất cho anh.")
